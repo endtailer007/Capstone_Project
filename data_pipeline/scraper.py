@@ -8,6 +8,8 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import pandas as pd
 import requests
+import sqlite3
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +28,9 @@ HEADERS = {
 }
 
 RATING_CLASSES = ["One", "Two", "Three", "Four", "Five"]
+
+# Project's fixed baseline conversion rate (1 GBP = 105.50 INR)
+GBP_TO_INR_RATE = 105.50
 
 
 def get_categories(session: requests.Session) -> list[dict]:
@@ -177,6 +182,95 @@ def main():
     return df
 
 
+def save_to_sqlite(df: pd.DataFrame, db_path: str):
+    """
+    Inserts cleaned DataFrame records into the normalized SQLite schema
+    (categories and books tables).
+    """
+    logger.info(f"Saving normalized records to SQLite database: {db_path}")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        # Enable Foreign Key support
+        cursor.execute("PRAGMA foreign_keys = ON;")
+
+        # 1. Insert unique categories (avoid duplicates)
+        unique_categories = df['category'].drop_duplicates().tolist()
+        cursor.executemany(
+            "INSERT OR IGNORE INTO categories (category_name) VALUES (?);",
+            [(cat,) for cat in unique_categories]
+        )
+        conn.commit()
+
+        # 2. Query category_id mapping from database
+        cursor.execute("SELECT category_name, category_id FROM categories;")
+        category_map = dict(cursor.fetchall())
+
+        # Map category_id onto DataFrame
+        df_to_save = df.copy()
+        df_to_save['category_id'] = df_to_save['category'].map(category_map)
+
+        # 3. Insert Books
+        books_records = [
+            (
+                str(row['title']),
+                float(row['price_gbp']),
+                float(row['price_inr']),
+                int(row['star_rating']),
+                int(row['in_stock']),
+                int(row['category_id'])
+            )
+            for _, row in df_to_save.iterrows()
+        ]
+
+        cursor.executemany("""
+        INSERT INTO books (title, price_gbp, price_inr, rating, in_stock, category_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(title, category_id) DO UPDATE SET
+            price_gbp = excluded.price_gbp,
+            price_inr = excluded.price_inr,
+            rating    = excluded.rating,
+            in_stock  = excluded.in_stock;
+        """, books_records)
+
+        conn.commit()
+        logger.info(f"Successfully upserted {len(books_records)} books across {len(unique_categories)} categories into SQLite!")
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     df = main()
+    # Stripping the currency symbol, if the currency symbol is other than £, it will be converted to NaN and handled by the 'coerce' parameter
+    df['price'] = pd.to_numeric(
+        df['price'].astype(str).str.replace('£','', regex = False),
+        errors = 'coerce'
+    )
+    #Rename price column to price_gbp
+    df.rename(columns = {'price': 'price_gbp'},inplace=True)
+    median_price = df['price_gbp'].median()
+    #Fill the null values with median price, because median is not sensitive to outliers.
+    df['price_gbp'] = df['price_gbp'].fillna(median_price)
+    # Map rating words to integers
+    rating_map = {
+        "One": 1,
+        "Two": 2,
+        "Three": 3,
+        "Four": 4,
+        "Five": 5
+    }
+    df['star_rating'] = df['star_rating'].str.title().map(rating_map)
+    #Impute with the mode since this is a discrete variable.
+    if not df['star_rating'].mode().empty:
+        mode_rating = df['star_rating'].mode()[0]
+        df['star_rating'] = df['star_rating'].fillna(mode_rating)
+    df['star_rating'] = df['star_rating'].astype(int)
+    df['in_stock'] = df['availability'].str.contains("in stock", case=False, na=False)
+    # Convert price_gbp to price_inr using project baseline fixed conversion rate: 1 GBP = 105.50 INR
+    df['price_inr'] = (df['price_gbp'] * GBP_TO_INR_RATE).round(2)
 
+    # Insert into SQLite Database
+    target_dir = os.path.dirname(os.path.abspath(__file__))
+    db_file = os.path.join(target_dir, "books_database.db")
+    save_to_sqlite(df, db_file)
