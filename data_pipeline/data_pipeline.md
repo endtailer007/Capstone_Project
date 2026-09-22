@@ -28,4 +28,5 @@ This program will generate `query_outputs.md` file, in which there will be a des
 - **Scraped Data**: The scraped books are stored in `scraped_books.csv`.
 - **Database Schema**: Database schema is stored in `schema.sql`.
 - **Database File**: Database where `categories` and `books` tables are stored in `books_database.db`.
-- **scraper.py**: While inserting data into `books` table, I have used 'ON CONFLICT(title, category_id) DO UPDATE SET' to avoid duplicate entries for the same title, so if we run the scraper.py multiple times, it will not insert duplicate entries, it just updates the latest price, rating and in_stock boolean for the title keeping the category_id same, this way we can avoid duplicate titles in our database.
+- **scraper.py**: While inserting data into `books` table, I have used 'ON CONFLICT(title, category_id) DO UPDATE SET' to avoid duplicate entries for the same title, so if we run the scraper.py multiple times, it will not insert duplicate entries, but keeps prices, ratings and stock status upto date.
+- **schema.sql**: While creating tables, I have used 'IF NOT EXISTS' clause to avoid errors if the tables already exist.
