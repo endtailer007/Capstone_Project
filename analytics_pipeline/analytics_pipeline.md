@@ -32,7 +32,7 @@ From initial inspection in [01_eda.ipynb](file:///d:/Capstone_Project/analytics_
    - 2nd Class Males: **$15.74\%$** survival (17 of 108 survived).
    - 3rd Class Males: **$13.54\%$** survival (47 of 347 survived).
 5. **Distribution Skewness**:
-   - `fare` is heavily right-skewed (Median: $\$14.45$, Mode: $\$8.05$, Mean: $\$32.10$) due to high-value 1st-class tickets reaching over $\$500$.
+   - `fare` is heavily right-skewed (Median: \$14.45$, Mode: \$8.05$, Mean: \$32.10$) due to high-value 1st-class tickets reaching over \$500$.
 
 ---
 
