@@ -45,14 +45,12 @@ To prevent **data leakage**, all transformations are fitted strictly on $X_{trai
   - `age`, `fare` $\rightarrow$ `SimpleImputer(strategy='mean')` $\rightarrow$ `StandardScaler()`.
 - **Categorical Pipeline**:
   - `sex`, `embarked` $\rightarrow$ `SimpleImputer(strategy='most_frequent')` $\rightarrow$ `OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore')`.
-- **Feature Selection / Auto-Drop**:
-  - `remainder='drop'` automatically filters out redundant string columns (`alive`, `class`, `deck`, `who`, `embark_town`) while passing through `pclass`, `sibsp`, `parch`, `adult_male`, and `alone`.
 
 ---
 
 ### Step 3: Class Imbalance Handling Comparison
 
-We tested 3 variants of Logistic Regression on the holdout test set to evaluate minority-class handling:
+I have tested 3 variants of Logistic Regression on the test set to evaluate minority-class handling:
 
 | Strategy | Accuracy | Precision | Recall | F1-Score | ROC-AUC |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -61,7 +59,7 @@ We tested 3 variants of Logistic Regression on the holdout test set to evaluate 
 | **(c) SMOTE (Train-Only)** | 0.7809 | 0.6944 | **0.7246** | 0.7092 | 0.8502 |
 
 > **Imbalance Conclusion:**  
-> `class_weight='balanced'` is the preferred imbalance strategy. It adjusts the cost function directly without generating synthetic Euclidean artifacts (unlike SMOTE), boosting minority-class Recall from $69.57\%$ to $72.46\%$ while preserving model stability.
+> `class_weight='balanced'` is the preferred imbalance strategy since it yielded the best results. It boosts minority-class Recall from $69.57\%$ to $72.46\%$ while preserving model stability.
 
 ---
 
@@ -92,24 +90,24 @@ We tested 3 variants of Logistic Regression on the holdout test set to evaluate 
 | **Multivariate Linear Regression** | `survived` | **0.2912** | **0.3704** | **0.4208** | **0.3934** |
 
 #### 3. Residual Diagnostics & Heteroscedasticity:
-- When fitting a regression model on `fare`, the residual plot shows distinct **heteroscedasticity** (a non-random fan/cone spread). Residual variance expands significantly as predicted fares exceed $\$50$, driven by extreme 1st-class ticket prices ($>\$250$) and the non-negative price boundary ($>\$0$).
+- When fitting a regression model on `fare`, the residual plot shows distinct **heteroscedasticity** (a non-random residual spread). Residual variance expands significantly as predicted fares exceed $\$50$, driven by extreme 1st-class ticket prices ($>\$250$) and the non-negative price boundary ($>\$0$).
 - When predicting binary `survived` via Linear Regression, the linear probability model produces unbounded predictions outside $[0, 1]$ and non-normal residuals, confirming that non-linear tree-based ensembles are mathematically superior for this task.
 
 ---
 
 ### Step 5: Final Deployment Recommendation
 
-* **Primary Recommendation:** I recommend deploying the **Random Forest Classifier** as it achieves the best overall performance on the test set, leading with an **ROC-AUC of $0.8693$** and an **Accuracy of $82.58\%$**.
-* **Superior Balance:** It delivers the highest **F1-Score of $0.7634$** with a strong balance between **Precision ($80.65\%$)** and **Recall ($72.46\%$)**, outperforming Logistic Regression ($\text{F1} = 0.7273$) and Decision Tree ($\text{F1} = 0.6774$).
-* **Complex Feature Interactions:** The ensemble architecture effectively captures key non-linear relationships—such as the intersection of passenger class, sex, and fare—without the high variance of a single decision tree.
-* **Appropriate Model Type:** Unlike linear regression ($R^2 = 0.4208$), Random Forest natively constrains survival probabilities to $[0, 1]$ while minimizing missed survivors ($\text{FN} = 19$).
+* I recommend deploying the **Random Forest Classifier** as it achieves the best overall performance on the test set, leading with an **ROC-AUC of $0.8693$** and an **Accuracy of $82.58\%$**.
+* It delivers the highest **F1-Score of $0.7634$** with a strong balance between **Precision ($80.65\%$)** and **Recall ($72.46\%$)**, outperforming Logistic Regression ($\text{F1} = 0.7273$) and Decision Tree ($\text{F1} = 0.6774$).
+* The ensemble architecture captures key non-linear relationships—such as the intersection of passenger class, sex, and fare—without the high variance of a single decision tree.
+* Unlike linear regression ($R^2 = 0.4208$), Random Forest natively constrains survival probabilities to $[0, 1]$ while minimizing missed survivors ($\text{FN} = 19$).
 
 ---
 
 ### Step 6: Production Pipeline Artifact & Verification
 
 The best-performing model and its preprocessing steps have been serialized together as a single artifact:
-- **Serialized Artifact**: `titanic_best_rf_pipeline.joblib` / `titanic_production_pipeline.joblib`
+- **Serialized Artifact**: `titanic_best_rf_pipeline.joblib`
 - **End-to-End Inference Verification**:
   ```python
   import joblib
@@ -132,7 +130,7 @@ The best-performing model and its preprocessing steps have been serialized toget
 ---
 
 ### Misc / Reference Files
-- **Raw Dataset**: [titanic.csv](file:///d:/Capstone_Project/analytics_pipeline/titanic.csv) (891 passenger records).
-- **EDA & Storytelling Notebook**: [01_eda.ipynb](file:///d:/Capstone_Project/analytics_pipeline/01_eda.ipynb) (Data profiling, missing values, skewness, 4-chart narrative).
-- **Modeling & Pipeline Notebook**: [02_eda.ipynb](file:///d:/Capstone_Project/analytics_pipeline/02_eda.ipynb) (ColumnTransformer, classifiers, imbalance handling, regression diagnostics, grid search).
+- **Raw Dataset**: [titanic.csv](891 passenger records).
+- **EDA & Storytelling Notebook**: [01_eda.ipynb](Data profiling, missing values, skewness, 4-chart narrative).
+- **Modeling & Pipeline Notebook**: [02_eda.ipynb](ColumnTransformer, classifiers, imbalance handling, regression diagnostics, grid search).
 - **Model Artifact**: `titanic_best_rf_pipeline.joblib` (Full self-contained pipeline ready for production).
