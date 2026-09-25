@@ -1,0 +1,14 @@
+﻿# Generated vector database — rebuilt at container startup
+chroma_db/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Dev / editor artefacts
+.env
+*.log
+.git/
+.gitignore

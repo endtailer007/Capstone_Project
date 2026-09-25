@@ -9,11 +9,14 @@ Also provides:
   - build_prompt()  : structured role-context-task-format-length prompt template.
   - build_graph()   : LangGraph StateGraph with 3 nodes and conditional routing.
                       Respects the MOCK_LLM env-var toggle.
+  - SupportAnswer   : Pydantic output schema (answer, sources, confidence).
 """
 
 import os
-from typing import Literal
+import json
+from typing import Literal, Optional
 from typing_extensions import TypedDict
+from pydantic import BaseModel, Field, field_validator
 import chromadb
 from sentence_transformers import SentenceTransformer
 from langgraph.graph import StateGraph, END
@@ -50,6 +53,30 @@ POLICY_KEYWORDS = {
     "delivery", "return", "refund", "membership",
     "tracking", "cancel", "gift card", "support hours",
 }
+
+
+# Pydantic output schema
+class SupportAnswer(BaseModel):
+    """
+    Enforced JSON output schema for every graph response.
+
+    Fields
+    ------
+    answer     : The human-readable answer text.
+    sources    : IDs of the ChromaDB chunks used to generate the answer.
+                 Empty list for general_question answers (no retrieval).
+    confidence : A float in [0, 1] representing answer confidence.
+                 Mock mode always returns 1.0 deterministically.
+    """
+    answer:     str            = Field(..., description="Human-readable answer to the customer's question.")
+    sources:    list[str]      = Field(default_factory=list, description="ChromaDB chunk IDs used; empty for general questions.")
+    confidence: float          = Field(..., ge=0.0, le=1.0, description="Confidence score between 0 and 1.")
+
+    @field_validator("confidence")
+    @classmethod
+    def _clamp_confidence(cls, v: float) -> float:
+        """Silently clamp confidence to [0, 1] before validation fails."""
+        return max(0.0, min(1.0, v))
 
 
 #Helpers
@@ -302,15 +329,19 @@ class ZeptoState(TypedDict):
 
     Fields
     ------
-    query        : the original customer question
-    intent       : classification result — 'policy_question' or 'general_question'
-    chunks       : top-k text chunks retrieved from ChromaDB (populated by retrieve_and_answer)
-    answer       : the final answer string produced by a terminal node
+    query            : the original customer question
+    intent           : classification result — 'policy_question' or 'general_question'
+    chunks           : top-k text chunks retrieved from ChromaDB (populated by retrieve_and_answer)
+    chunk_ids        : ChromaDB IDs for the retrieved chunks (used to populate SupportAnswer.sources)
+    answer           : the final answer string produced by a terminal node
+    structured_answer: the validated SupportAnswer dict (JSON-serialisable)
     """
-    query:  str
-    intent: str
-    chunks: list
-    answer: str
+    query:             str
+    intent:            str
+    chunks:            list
+    chunk_ids:         list
+    answer:            str
+    structured_answer: dict
 
 
 def _get_collection() -> chromadb.Collection:
@@ -400,28 +431,68 @@ def retrieve_and_answer(state: ZeptoState) -> ZeptoState:
 
     collection = _get_collection()
     results = collection.query(query_embeddings=query_vec, n_results=3)
-    retrieved_chunks = results["documents"][0]  # list of 3 chunk strings
+    retrieved_chunks  = results["documents"][0]  # list of 3 chunk strings
+    retrieved_ids     = results["ids"][0]         # list of 3 chunk ID strings
 
-    print(f"  [retrieve_and_answer] retrieved {len(retrieved_chunks)} chunk(s)")
+    print(f"  [retrieve_and_answer] retrieved {len(retrieved_chunks)} chunk(s): {retrieved_ids}")
 
     if MOCK_LLM:
         # Mock answer — canned template using the top chunk
         top_chunk_snippet = retrieved_chunks[0][:200] if retrieved_chunks else ""
-        answer = f"Based on the retrieved context: {top_chunk_snippet}"
-        print(f"  [retrieve_and_answer | MOCK] answer generated")
+        answer_text = f"Based on the retrieved context: {top_chunk_snippet}"
+
+        # Build SupportAnswer deterministically — no LLM output to validate
+        structured = SupportAnswer(
+            answer=answer_text,
+            sources=retrieved_ids,   # IDs of the 3 retrieved chunks
+            confidence=1.0,          # fixed value in mock mode
+        )
+        print(f"  [retrieve_and_answer | MOCK] SupportAnswer built")
     else:
-        # Optional real-LLM extension
-        # Example (Gemini):
+        # Optional real-LLM extension with retry-on-validation-failure
+        #
+        # Pseudocode (wire up your LLM SDK here):
+        #
         #   import google.generativeai as genai
-        #   prompt = build_prompt(query, retrieved_chunks)
         #   llm = genai.GenerativeModel("gemini-1.5-flash")
-        #   answer = llm.generate_content(prompt).text.strip()
+        #   prompt = build_prompt(query, retrieved_chunks)
+        #   schema_instruction = (
+        #       "Respond ONLY with a JSON object matching this schema — no extra text:\n"
+        #       '{"answer": "<str>", "sources": ["<chunk_id>", ...], "confidence": <float 0-1>}'
+        #   )
+        #   full_prompt = prompt + "\n\n" + schema_instruction
+        #
+        #   structured = None
+        #   for attempt in range(3):  # initial + 2 retries
+        #       raw = llm.generate_content(full_prompt).text.strip()
+        #       try:
+        #           structured = SupportAnswer.model_validate_json(raw)
+        #           break
+        #       except Exception as exc:
+        #           if attempt < 2:
+        #               full_prompt = (
+        #                   f"Your previous response failed schema validation: {exc}\n"
+        #                   "Please correct and respond ONLY with valid JSON matching the schema.\n\n"
+        #                   + schema_instruction
+        #               )
+        #           else:
+        #               structured = SupportAnswer(
+        #                   answer="[ERROR] Could not generate a valid structured response after 3 attempts.",
+        #                   sources=retrieved_ids,
+        #                   confidence=0.0,
+        #               )
         raise NotImplementedError(
             "Real-LLM retrieve_and_answer not wired up yet. "
             "Set MOCK_LLM=1 or implement your LLM call above."
         )
 
-    return {**state, "chunks": retrieved_chunks, "answer": answer}
+    return {
+        **state,
+        "chunks":            retrieved_chunks,
+        "chunk_ids":         retrieved_ids,
+        "answer":            structured.answer,
+        "structured_answer": structured.model_dump(),
+    }
 
 
 # Node 3 — direct_answer
@@ -438,20 +509,57 @@ def direct_answer(state: ZeptoState) -> ZeptoState:
     Prompts the LLM directly (no retrieval).
     """
     if MOCK_LLM:
-        answer = "I can only answer questions about Zepto policies right now."
-        print(f"  [direct_answer | MOCK] answer='{answer}'")
+        answer_text = "I can only answer questions about Zepto policies right now."
+
+        # Build SupportAnswer deterministically — no LLM output to validate
+        structured = SupportAnswer(
+            answer=answer_text,
+            sources=[],     # no retrieval for general questions
+            confidence=1.0, # fixed value in mock mode
+        )
+        print(f"  [direct_answer | MOCK] SupportAnswer built")
     else:
-        # Optional real-LLM extension
-        # Example (Gemini):
+        # Optional real-LLM extension with retry-on-validation-failure
+        #
+        # Pseudocode (wire up your LLM SDK here):
+        #
         #   import google.generativeai as genai
         #   llm = genai.GenerativeModel("gemini-1.5-flash")
-        #   answer = llm.generate_content(state["query"]).text.strip()
+        #   schema_instruction = (
+        #       "Respond ONLY with a JSON object matching this schema — no extra text:\n"
+        #       '{"answer": "<str>", "sources": [], "confidence": <float 0-1>}'
+        #   )
+        #   full_prompt = state["query"] + "\n\n" + schema_instruction
+        #
+        #   structured = None
+        #   for attempt in range(3):  # initial + 2 retries
+        #       raw = llm.generate_content(full_prompt).text.strip()
+        #       try:
+        #           structured = SupportAnswer.model_validate_json(raw)
+        #           break
+        #       except Exception as exc:
+        #           if attempt < 2:
+        #               full_prompt = (
+        #                   f"Your previous response failed schema validation: {exc}\n"
+        #                   "Please correct and respond ONLY with valid JSON matching the schema.\n\n"
+        #                   + schema_instruction
+        #               )
+        #           else:
+        #               structured = SupportAnswer(
+        #                   answer="[ERROR] Could not generate a valid structured response after 3 attempts.",
+        #                   sources=[],
+        #                   confidence=0.0,
+        #               )
         raise NotImplementedError(
             "Real-LLM direct_answer not wired up yet. "
             "Set MOCK_LLM=1 or implement your LLM call above."
         )
 
-    return {**state, "answer": answer}
+    return {
+        **state,
+        "answer":            structured.answer,
+        "structured_answer": structured.model_dump(),
+    }
 
 
 def build_graph() -> StateGraph:
@@ -519,13 +627,16 @@ if __name__ == "__main__":
         print(f"\n{'='*60}")
         print(f"Query : {q}")
         initial_state: ZeptoState = {
-            "query":  q,
-            "intent": "",
-            "chunks": [],
-            "answer": "",
+            "query":             q,
+            "intent":            "",
+            "chunks":            [],
+            "chunk_ids":         [],
+            "answer":            "",
+            "structured_answer": {},
         }
         result = app.invoke(initial_state)
         print(f"Intent: {result['intent']}")
-        print(f"Answer: {result['answer']}")
+        print(f"Structured JSON output:")
+        print(json.dumps(result["structured_answer"], indent=2))
     print(f"{'='*60}")
 
